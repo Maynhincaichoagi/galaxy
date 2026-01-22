@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Dark Interstellar - Interactive</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        /* Nền tối chuẩn màu cũ */
+        body { margin: 0; background: #050002; overflow: hidden; font-family: 'Segoe UI', sans-serif; touch-action: none; }
+        canvas { display: block; }
+        .input_video { display: none; }
+
+        /* Loading */
+        #loading {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: #050002;
+            display: flex; flex-direction: column;
+            justify-content: center; align-items: center; color: #ff0055; z-index: 999;
+            transition: opacity 1s;
+        }
+
+        /* Loader Mắt Long Lanh */
+        .loader {
+            height: 30px; aspect-ratio: 2; display: grid;
+            background:
+                radial-gradient(farthest-side,#000 15%,#0000 18%)0 0/50% 100%,
+                radial-gradient(50% 100% at 50% 160%,#fff 95%,#0000) 0 0   /50% 50%,
+                radial-gradient(50% 100% at 50% -60%,#fff 95%,#0000) 0 100%/50% 50%;
+            background-repeat: repeat-x; animation: l2 1.5s infinite linear; margin-bottom: 20px;
+        }
+        @keyframes l2 {
+            0%, 15% {background-position:0 0,0 0,0 100%} 20%, 40% {background-position:5px 0,0 0,0 100%}
+            45%, 55% {background-position:0 0,0 0,0 100%} 60%, 80% {background-position:-5px 0,0 0,0 100%}
+            85%, 100% {background-position:0 0,0 0,0 100%}
+        }
+        
+        /* UI Gọn nhẹ */
+        #ui { position: absolute; bottom: 30px; width: 100%; text-align: center; pointer-events: none; z-index: 10; }
+        .hud-box {
+            display: inline-block; background: rgba(20, 0, 10, 0.6);
+            border: 1px solid #ff0055; color: #ff0055;
+            padding: 8px 16px; border-radius: 30px; font-size: 13px;
+            box-shadow: 0 0 15px rgba(255, 0, 85, 0.2); backdrop-filter: blur(4px);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loading">
+        <div class="loader"></div>
+        <p style="margin-top: 10px; font-size: 14px; opacity: 0.8;">Đang khởi tạo...</p>
+    </div>
+
+    <div id="ui">
+        <div class="hud-box">
+            <span id="hand-status">📡 Đang tìm tay...</span>
+        </div>
+    </div>
+    <video class="input_video" playsinline webkit-playsinline></video>
+
+    <script>
+        const manager = new THREE.LoadingManager();
+        manager.onLoad = () => {
+            const ls = document.getElementById('loading');
+            ls.style.opacity = 0; setTimeout(() => ls.style.display = 'none', 1000);
+        };
+        const texLoader = new THREE.TextureLoader(manager);
+
+        const scene = new THREE.Scene();
+        // MÀU CŨ: Đen ánh đỏ (#050002) - Không dùng cực quang lòe loẹt nữa
+        const BG_COLOR = 0x050002;
+        scene.background = new THREE.Color(BG_COLOR); 
+        scene.fog = new THREE.FogExp2(BG_COLOR, 0.0001); 
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 300000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        document.body.appendChild(renderer.domElement);
+
+        // === HIỆU ỨNG WARP SPEED (DU HÀNH SIÊU TỐC) ===
+        const warpStarsGeo = new THREE.BufferGeometry();
+        const warpStarsPos = [];
+        for(let i=0; i<1500; i++) {
+            let x = (Math.random() - 0.5) * 10000;
+            let y = (Math.random() - 0.5) * 10000;
+            let z = Math.random() * 20000;
+            warpStarsPos.push(x,y,z);
+            warpStarsPos.push(x,y,z - 500); // Tạo vệt dài
+        }
+        warpStarsGeo.setAttribute('position', new THREE.Float32BufferAttribute(warpStarsPos, 3));
+        const warpStarsMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending });
+        const warpStarsLines = new THREE.LineSegments(warpStarsGeo, warpStarsMat);
+        warpStarsLines.visible = false;
+        scene.add(warpStarsLines);
+
+        // === 1. HỆ MẶT TRỜI ===
+        const solarSystemGroup = new THREE.Group();
+        scene.add(solarSystemGroup);
+
+        const BASE_URL = 'https://raw.githubusercontent.com/jeromeetienne/threex.planets/master/images/';
+        const EARTH_URL = 'https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/planets/';
+
+        const sun = new THREE.Mesh(new THREE.SphereGeometry(15, 64, 64), new THREE.MeshBasicMaterial({ map: texLoader.load(BASE_URL + 'sunmap.jpg'), color: 0xffffee }));
+        const sunGlow = new THREE.Sprite(new THREE.SpriteMaterial({ 
+            map: new THREE.TextureLoader().load('https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/sprites/glow.png'), 
+            color: 0xffaa00, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending 
+        }));
+        sunGlow.scale.set(60, 60, 1); sun.add(sunGlow);
+        solarSystemGroup.add(sun);
+
+        const sunLight = new THREE.PointLight(0xffffff, 1.5, 5000); solarSystemGroup.add(sunLight);
+        solarSystemGroup.add(new THREE.AmbientLight(0x442222));
+
+        const planets = [];
+        const planetData = [
+            { name: 'Mercury', size: 1, dist: 25, speed: 0.04, tex: BASE_URL + 'mercurymap.jpg' },
+            { name: 'Venus', size: 2.2, dist: 38, speed: 0.025, tex: BASE_URL + 'venusmap.jpg' },
+            { name: 'Earth', size: 2.5, dist: 55, speed: 0.015, tex: EARTH_URL + 'earth_atmos_2048.jpg', cloud: true, hasMoon: true },
+            { name: 'Mars', size: 1.4, dist: 70, speed: 0.012, tex: BASE_URL + 'marsmap1k.jpg' },
+            { name: 'Jupiter', size: 8, dist: 110, speed: 0.006, tex: BASE_URL + 'jupitermap.jpg' },
+            { name: 'Saturn', size: 7, dist: 160, speed: 0.004, tex: BASE_URL + 'saturnmap.jpg', ring: true },
+            { name: 'Uranus', size: 4, dist: 210, speed: 0.003, tex: BASE_URL + 'uranusmap.jpg' },
+            { name: 'Neptune', size: 3.8, dist: 250, speed: 0.002, tex: BASE_URL + 'neptunemap.jpg' }
+        ];
+
+        function createSaturnRing(iR, oR) {
+            const geo = new THREE.RingGeometry(iR, oR, 64);
+            var pos = geo.attributes.position; var v3 = new THREE.Vector3();
+            for (let i = 0; i < pos.count; i++){ v3.fromBufferAttribute(pos, i); geo.attributes.uv.setXY(i, v3.length()<(iR+oR)/2?0:1, 1); }
+            const cvs = document.createElement('canvas'); cvs.width=256; cvs.height=1; 
+            const ctx=cvs.getContext('2d'); const grd=ctx.createLinearGradient(0,0,256,0);
+            grd.addColorStop(0,'rgba(0,0,0,0)'); grd.addColorStop(0.5,'rgba(200,180,150,0.8)'); grd.addColorStop(1,'rgba(0,0,0,0)');
+            ctx.fillStyle=grd; ctx.fillRect(0,0,256,1);
+            const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({map:new THREE.CanvasTexture(cvs), side:THREE.DoubleSide, transparent:true, opacity:0.9}));
+            m.rotation.x = -Math.PI/2.2; return m;
+        }
+
+        planetData.forEach(d => {
+            const p = new THREE.Group(); solarSystemGroup.add(p);
+            const m = new THREE.Mesh(new THREE.SphereGeometry(d.size, 64, 64), new THREE.MeshStandardMaterial({map: texLoader.load(d.tex), roughness:0.7}));
+            m.position.x = d.dist; p.add(m);
+
+            if(d.cloud) { const c = new THREE.Mesh(new THREE.SphereGeometry(d.size+0.05, 64, 64), new THREE.MeshPhongMaterial({map: texLoader.load(EARTH_URL+'earth_clouds_1024.png'), transparent:true, opacity:0.8, blending:THREE.AdditiveBlending})); m.add(c); planets.push({mesh:m, pivot:p, speed:d.speed, cloud:c}); }
+            else if(d.ring) { m.add(createSaturnRing(d.size*1.3, d.size*2.5)); planets.push({mesh:m, pivot:p, speed:d.speed}); }
+            else planets.push({mesh:m, pivot:p, speed:d.speed});
+
+            if (d.hasMoon) {
+                const mp = new THREE.Group(); m.add(mp);
+                const mn = new THREE.Mesh(new THREE.SphereGeometry(0.7, 32, 32), new THREE.MeshStandardMaterial({ map: texLoader.load(BASE_URL + 'moonmap1k.jpg'), roughness: 0.8 }));
+                mn.position.x = 5; mp.add(mn); d.moonObj = mp;
+            }
+            const orb = new THREE.Mesh(new THREE.RingGeometry(d.dist-0.1, d.dist+0.1, 64), new THREE.MeshBasicMaterial({color: 0xff0055, side:THREE.DoubleSide, transparent:true, opacity:0.1}));
+            orb.rotation.x = -Math.PI/2; solarSystemGroup.add(orb);
+        });
+
+        const asteroids = new THREE.Group(); solarSystemGroup.add(asteroids);
+        const rockGeo = new THREE.DodecahedronGeometry(0.2, 0); const rockMat = new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.9 });
+        for(let i=0; i<1000; i++) {
+            const rock = new THREE.Mesh(rockGeo, rockMat);
+            const r = 85 + Math.random() * 15; const theta = Math.random() * Math.PI * 2;
+            rock.position.set(r*Math.cos(theta), (Math.random()-0.5)*3, r*Math.sin(theta));
+            rock.rotation.set(Math.random(), Math.random(), Math.random()); rock.scale.setScalar(0.5 + Math.random());
+            asteroids.add(rock);
+        }
+
+        // === 2. VŨ TRỤ TIM ===
+        const galaxyGroup = new THREE.Group();
+        scene.add(galaxyGroup); galaxyGroup.visible = false; galaxyGroup.position.z = -2000; 
+
+        function createHeartTex() {
+            const c = document.createElement('canvas'); c.width=64; c.height=64; const ctx=c.getContext('2d');
+            ctx.beginPath(); const x=32, y=32;
+            ctx.moveTo(x, y+15); ctx.bezierCurveTo(x, y+15, x-20, y, x-20, y-12); ctx.bezierCurveTo(x-20, y-27, x-5, y-27, x, y-17);
+            ctx.bezierCurveTo(x+5, y-27, x+20, y-27, x+20, y-12); ctx.bezierCurveTo(x+20, y, x, y+15, x, y+15);
+            const g = ctx.createRadialGradient(x, y-5, 2, x, y, 30);
+            g.addColorStop(0,"rgba(255,255,255,0.9)"); g.addColorStop(0.3,"rgba(255,255,255,0.7)"); g.addColorStop(1,"rgba(255,255,255,0)");
+            ctx.fillStyle=g; ctx.fill(); return new THREE.CanvasTexture(c);
+        }
+
+        const heartPos = []; const heartCol = [];
+        const col1 = new THREE.Color('#ff0055'); const col2 = new THREE.Color('#ffcc00'); 
+        for(let i=0; i<60000; i++) {
+            const r = Math.random() * 20000 + 500; const theta = Math.random() * Math.PI * 2; const phi = Math.acos(2 * Math.random() - 1);
+            heartPos.push(r * Math.sin(phi) * Math.cos(theta), r * Math.sin(phi) * Math.sin(theta), r * Math.cos(phi));
+            const c = col1.clone().lerp(col2, Math.random()); heartCol.push(c.r, c.g, c.b);
+        }
+        
+        const heartMat = new THREE.PointsMaterial({ size: 150, map: createHeartTex(), transparent: true, opacity: 0.9, vertexColors: true, blending: THREE.AdditiveBlending, depthWrite: false });
+        const heartPoints = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(heartPos,3)).setAttribute('color', new THREE.Float32BufferAttribute(heartCol,3)), heartMat);
+        galaxyGroup.add(heartPoints);
+
+        // === ĐIỀU KHIỂN ===
+        let targetZoom=100, sZoom=100, tRotX=0, sRotX=0, tRotY=0.5, sRotY=0.5;
+        let handDetected = false;
+        const statusEl = document.getElementById('hand-status'); 
+        const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+        const hands = new Hands({locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+        hands.setOptions({ maxNumHands: 1, modelComplexity: isMobile ? 0 : 1 });
+        hands.onResults(res => {
+            if (res.multiHandLandmarks && res.multiHandLandmarks.length > 0) {
+                handDetected = true;
+                const lm = res.multiHandLandmarks[0];
+                const d = Math.sqrt(Math.pow(lm[4].x-lm[8].x,2) + Math.pow(lm[4].y-lm[8].y,2));
+                let v = Math.max(0, Math.min(1, (d-0.02)/0.25));
+                targetZoom = 40 + Math.pow(v, 4) * 8000; 
+                tRotX = (lm[9].x-0.5)*5; tRotY = (lm[9].y-0.5)*3;
+                statusEl.innerText = "✨ Đã kết nối tay"; statusEl.style.color = "#ff0055";
+            } else { 
+                handDetected = false;
+                statusEl.innerText = isMobile ? "📡 Giơ tay trước cam..." : "📡 Đang tìm tay..."; statusEl.style.color = "#ffaa00"; 
+            }
+        });
+
+        const vEl = document.getElementsByClassName('input_video')[0];
+        const cam = new Camera(vEl, { onFrame: async()=>{await hands.send({image:vEl});}, width: 320, height: 240, facingMode: 'user' });
+        cam.start();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            sun.rotation.y += 0.002;
+            planets.forEach(p => { 
+                p.mesh.rotation.y+=0.005; p.pivot.rotation.y+=p.speed; 
+                if(p.cloud) p.cloud.rotation.y+=0.002;
+                if(p.moonObj) p.moonObj.rotation.y += 0.02;
+            });
+            asteroids.rotation.y += 0.0005;
+
+            // === TƯƠNG TÁC TAY (Interactive) ===
+            // Nếu phát hiện tay, vũ trụ sẽ sáng hơn và xoay theo tay
+            if(handDetected) {
+                heartMat.size = 170; heartMat.opacity = 1.0;
+                galaxyGroup.rotation.y += 0.001 + (tRotX * 0.001);
+                galaxyGroup.rotation.x += 0.0005 + (tRotY * 0.001);
+            } else {
+                heartMat.size = 150; heartMat.opacity = 0.9;
+                galaxyGroup.rotation.y += 0.0003; galaxyGroup.rotation.x += 0.0001;
+            }
+
+            sZoom += (targetZoom - sZoom) * 0.03;
+            sRotX += (tRotX - sRotX) * 0.03;
+            sRotY += (tRotY - sRotY) * 0.03;
+            const safeRotY = Math.max(-1.5, Math.min(1.5, sRotY));
+            
+            camera.position.x = sZoom * Math.sin(sRotX) * Math.cos(safeRotY);
+            camera.position.y = sZoom * Math.sin(safeRotY);
+            camera.position.z = sZoom * Math.cos(sRotX) * Math.cos(safeRotY);
+            camera.lookAt(0,0,0);
+
+            // === HIỆU ỨNG CHUYỂN CẢNH & WARP SPEED ===
+            const TRANSITION_POINT = 1200;
+            const FADE_RANGE = 500; 
+            let distToTransition = Math.abs(sZoom - TRANSITION_POINT);
+            
+            if (distToTransition < FADE_RANGE) {
+                // Mờ dần
+                scene.fog.density = 0.0001 + (1 - distToTransition / FADE_RANGE) * 0.015;
+                // Bật hiệu ứng Warp Speed (sao bay nhanh)
+                warpStarsLines.visible = true;
+                const positions = warpStarsLines.geometry.attributes.position.array;
+                for(let i=0; i<positions.length; i+=6) {
+                    positions[i+2] += 300; // Tốc độ bay
+                    positions[i+5] += 300;
+                    if(positions[i+2] > camera.position.z + 2000) {
+                        positions[i+2] -= 30000; positions[i+5] -= 30000;
+                    }
+                }
+                warpStarsLines.geometry.attributes.position.needsUpdate = true;
+            } else {
+                scene.fog.density = 0.0001;
+                warpStarsLines.visible = false;
+            }
+
+            if (sZoom < TRANSITION_POINT) {
+                solarSystemGroup.visible = true; galaxyGroup.visible = false;
+            } else {
+                solarSystemGroup.visible = false; galaxyGroup.visible = true;
+            }
+
+            renderer.render(scene, camera);
+        }
+        animate();
+        window.addEventListener('resize', () => { camera.aspect=window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth,window.innerHeight); });
+    </script>
+</body>
+</html>
